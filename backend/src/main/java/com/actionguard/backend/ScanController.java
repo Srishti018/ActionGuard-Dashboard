@@ -19,15 +19,20 @@ import java.util.stream.Stream;
 import java.util.Comparator;
 @RestController
 @RequestMapping("/api")
-@CrossOrigin(origins = "http://localhost:5173")
+@CrossOrigin(origins = {"http://localhost:3000", "http://localhost:5173"})
 public class ScanController {
 
     private static final String SCANNER_DIR =
-        "C:\\Users\\srish\\OneDrive\\Documents\\actionguard\\ActionGaurd";
+    System.getenv().getOrDefault(
+        "ACTIONGUARD_SCANNER_DIR",
+        "C:\\Users\\srish\\OneDrive\\Documents\\actionguard\\ActionGaurd"
+    );
 
     private static final String PYTHON =
-        "C:\\Python313\\python.exe";
-
+    System.getenv().getOrDefault(
+        "ACTIONGUARD_PYTHON",
+        "C:\\Python313\\python.exe"
+    );
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public record ScanRequest(String repoUrl) {}

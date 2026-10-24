@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 
-const API_URL = "http://localhost:8081";
+const API_URL = "";
 
 const SEVERITIES = [
   { key: "CRITICAL", label: "Critical", color: "#ff4058" },
