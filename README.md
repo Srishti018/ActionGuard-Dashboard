@@ -283,6 +283,7 @@ After tests and scans pass, Jenkins builds the images and runs `docker-compose u
 - `restart: always` in docker-compose brings containers back after a crash.
 - Images are tagged with the Jenkins build number (for example `actionguard-backend:42`), not only `latest`.
 - **Rollback:** if a deployment misbehaves, redeploy the previous tagged image.
+Docker deployment and automated Jenkins pipeline verification.
 ---
  
 ## CI/CD pipeline (Jenkins)
