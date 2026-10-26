@@ -1,230 +1,350 @@
 # ActionGuard Dashboard
- 
-A web dashboard that scans GitHub repositories for risky GitHub Actions usage, built as a DevOps course project and delivered through a full CI/CD pipeline covering all **7 C's of DevOps**.
- 
-> Inspired by the March 2025 `tj-actions/changed-files` supply-chain attack (CVE-2025-30066), where a trusted GitHub Action was compromised and its version tag was moved to malicious code. Workflows that referenced the action by tag silently started running it.
- 
+
+**ActionGuard** is a local web dashboard for identifying risky GitHub Actions workflow references, including actions that are not pinned to a full commit SHA and actions listed as known compromised. It combines a React frontend, a Spring Boot API, and a Python-based scanner.
+
+The project also demonstrates a DevOps workflow with Jenkins, Trivy filesystem scanning, Docker Compose, and Prometheus/Grafana monitoring.
+
+> **Status:** Local prototype. This README does not claim that the application is publicly deployed. Review the security section before exposing the API to the internet.
+
+## Table of contents
+
+- [Overview](#overview)
+- [Why ActionGuard exists](#why-actionguard-exists)
+- [Features](#features)
+- [Architecture](#architecture)
+- [How a scan works](#how-a-scan-works)
+- [Technology stack](#technology-stack)
+- [Related repositories](#related-repositories)
+- [Repository structure](#repository-structure)
+- [Requirements](#requirements)
+- [Run locally](#run-locally)
+- [Run with Docker Compose](#run-with-docker-compose)
+- [Configuration](#configuration)
+- [API and health checks](#api-and-health-checks)
+- [Understanding scan results](#understanding-scan-results)
+- [Jenkins CI/CD pipeline](#jenkins-cicd-pipeline)
+- [Trivy security scanning](#trivy-security-scanning)
+- [Prometheus and Grafana monitoring](#prometheus-and-grafana-monitoring)
+- [Testing and troubleshooting](#testing-and-troubleshooting)
+- [Security considerations](#security-considerations)
+- [Limitations](#limitations)
+- [Future improvements](#future-improvements)
+- [Screenshots](#screenshots)
+- [Contributing](#contributing)
+
 ---
- 
-## Table of Contents
- 
-1. [Overview](#overview)
-2. [Background: the problem we are addressing](#background-the-problem-we-are-addressing)
-3. [Features](#features)
-4. [How it works](#how-it-works)
-5. [Tech stack](#tech-stack)
-6. [Related repositories](#related-repositories)
-7. [Project structure](#project-structure)
-8. [Getting started](#getting-started)
-9. [Configuration](#configuration)
-10. [Scan output](#scan-output)
-11. [DevOps implementation: the 7 C's](#devops-implementation-the-7-cs)
-12. [CI/CD pipeline (Jenkins)](#cicd-pipeline-jenkins)
-13. [Security notes](#security-notes)
-14. [Limitations](#limitations)
-15. [Roadmap](#roadmap)
-16. [Team](#team)
----
- 
+
 ## Overview
- 
-GitHub Actions workflows often use third-party actions to build, test and deploy code. If a workflow references an action by a mutable **tag** (for example `@v1`) instead of a full 40-character **commit SHA**, whoever controls that tag can change the code the workflow runs without the workflow file changing at all. If the action is also on a known-compromised list, the risk is much higher.
- 
-ActionGuard Dashboard lets a user paste a GitHub repository URL and see, in one place, every `uses:` reference in that repository's workflows, whether it is pinned, and how risky it is.
- 
-The project is made of three repositories:
- 
-| Repository | Role |
+
+GitHub Actions workflows often use third-party actions to build, test, and deploy software. A workflow can reference an action with syntax such as `owner/repository@ref`. If the reference uses a mutable tag or branch rather than a full commit SHA, the code associated with that reference may change without a corresponding change to the workflow file.
+
+ActionGuard lets a user submit a GitHub repository URL and review workflow `uses:` references identified by the scanner. It checks for unpinned references and matches against the scanner's known-compromised data.
+
+The project has three related parts:
+
+| Component | Purpose |
 |---|---|
-| **actionguard** | The scanner (Python CLI). Reads workflow files and produces a JSON report |
-| **actionguard-demo** | The test subject. A fake trusted action, a vulnerable workflow (tag reference) and a fixed workflow (SHA reference), plus scripts that recreate the tag-move attack safely with fake secrets |
-| **actionguard-dashboard** (this repo) | Spring Boot backend + React frontend that runs the scanner and displays results |
- 
----
- 
-## Background: the problem we are addressing
- 
-A GitHub Action is reusable code that a workflow calls with `uses: owner/repo@ref`. The `ref` can be:
- 
-- a **tag or branch** (`@v1`, `@main`): can be moved to point at different code later
-- a **commit SHA** (`@a1b2c3...`, 40 characters): always the same exact code
-In the real incident, an attacker moved the tags of a popular action to a malicious commit. Every workflow using those tags ran the malicious code inside its CI runner, where it could read environment variables and secrets. The `actionguard-demo` repository recreates this mechanism safely using a fake action and fake secrets, and shows that pinning to a SHA blocks it.
- 
-This dashboard is the detection side: it finds the risky references before an attacker can use them.
- 
----
- 
+| **ActionGuard scanner** | Python CLI that inspects workflow files and produces a JSON report. |
+| **ActionGuard demo repository** | Demonstrates vulnerable versus fixed workflow references using a fake action and fake secrets. |
+| **ActionGuard Dashboard** | This repository: React frontend, Spring Boot backend, Docker configuration, and monitoring setup. |
+
+## Why ActionGuard exists
+
+The project is inspired by the March 2025 `tj-actions/changed-files` supply-chain incident (CVE-2025-30066), in which a trusted GitHub Action was compromised and a tag was moved to malicious code. Workflows relying on the affected mutable reference could run code different from what maintainers expected.
+
+A workflow reference may use:
+
+- **A tag or branch**, such as `@v1` or `@main`, which can be moved.
+- **A full commit SHA**, which identifies a specific commit and is not a movable tag.
+
+Pinning to full commit SHAs reduces risk from mutable references, but does not guarantee that the pinned code is safe.
+
 ## Features
- 
-- **Repository scanning**: submit a GitHub repository URL from the dashboard
-- **Workflow analysis**: finds every `uses:` reference in `.github/workflows/`
-- **Pinning check**: flags references that are not pinned to a full commit SHA
-- **Compromised-action check**: compares references against a known-compromised list (`known_compromised.json`), including `tj-actions/changed-files`
-- **Severity levels**: INFO, MEDIUM, HIGH, CRITICAL
-- **Finding details**: workflow file, line number, action reference, status and an explanation
-- **Automated delivery**: every push is built, tested, security-scanned, containerised and deployed by Jenkins
-- **Built-in monitoring and feedback**: health endpoint, uptime dashboard and failure notifications
----
- 
-## How it works
- 
-1. The user submits a GitHub repository URL in the React dashboard.
-2. The Spring Boot backend validates the URL and makes a temporary shallow clone.
-3. The backend runs the Python ActionGuard CLI against the clone.
-4. The scanner inspects the workflow files and writes a JSON report.
-5. The backend returns the report to the dashboard.
-6. The backend deletes the temporary clone.
+
+- Submit a GitHub repository URL from the dashboard.
+- Inspect `uses:` references in GitHub Actions workflow files.
+- Identify references that are not pinned to a full commit SHA.
+- Compare references with the scanner's known-compromised data.
+- Display severity classifications and finding details provided by the scanner.
+- Run the frontend, backend, and monitoring services locally using Docker Compose.
+- Use Jenkins to check out the repository, build the frontend, test the backend, run Trivy filesystem scanning, and build Docker images.
+- Expose Spring Boot Actuator endpoints and scrape Prometheus metrics for Grafana dashboards.
+
+Feature behavior is governed by the code and scanner rules in the current repository. A scan is not a complete audit of a repository.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    U[User] --> FE[React + Vite dashboard]
+    FE -->|HTTP request| BE[Spring Boot API]
+    BE -->|Validate URL and prepare temporary checkout| REPO[Temporary repository checkout]
+    BE -->|Invoke scanner| PY[Python ActionGuard CLI]
+    PY --> WF[Inspect workflow files and uses references]
+    WF --> RULES[Pinning rules and known-compromised data]
+    RULES --> REPORT[JSON scan report]
+    REPORT --> BE
+    BE --> FE
+    BE --> ACT[Spring Boot Actuator]
+    PROM[Prometheus] -->|Scrape metrics| ACT
+    PROM --> GRAF[Grafana dashboard]
+    J[Jenkins] --> PIPE[Build, test, Trivy scan, Docker image build]
 ```
-User
- │
- ▼
-React + Vite dashboard
- │  HTTP
- ▼
-Spring Boot backend
- ├── validate GitHub URL
- ├── shallow-clone repo to a temp directory
- └── run Python ActionGuard CLI
-          │
-          ▼
-   Workflow scanner
-    ├── parse `uses:` references
-    ├── check pinned vs unpinned
-    ├── check known_compromised.json
-    └── output JSON report
-          │
-          ▼
-Backend returns report ──► Dashboard shows summary + findings
+
+### Main components
+
+- **Frontend:** React and Vite provide the browser interface.
+- **Backend:** Spring Boot accepts scan requests and coordinates scanner execution.
+- **Scanner:** Python CLI examines workflow references and generates findings.
+- **Docker Compose:** defines the local application and monitoring services.
+- **Jenkins:** automates the configured build and verification stages.
+- **Trivy:** performs the filesystem security scan configured in the Jenkins pipeline.
+- **Prometheus and Grafana:** collect and display backend metrics.
+
+## How a scan works
+
+1. A user enters a GitHub repository URL in the dashboard.
+2. The frontend sends a request to the Spring Boot backend.
+3. The backend validates the URL and prepares a temporary checkout.
+4. The backend invokes the Python ActionGuard scanner.
+5. The scanner examines workflow references using its configured rules and known-compromised data.
+6. The scanner produces a JSON report.
+7. The backend returns the report for the frontend to display.
+8. The temporary checkout is intended to be removed after the scan completes.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as React Dashboard
+    participant API as Spring Boot Backend
+    participant Scan as Python Scanner
+    User->>UI: Submit repository URL
+    UI->>API: Scan request
+    API->>API: Validate input and prepare checkout
+    API->>Scan: Run scanner on checkout
+    Scan->>Scan: Inspect workflow references
+    Scan-->>API: JSON report
+    API-->>UI: Scan result
+    UI-->>User: Summary and findings
 ```
- 
----
- 
-## Tech stack
- 
-| Layer | Technology |
+
+## Technology stack
+
+| Area | Technology |
 |---|---|
 | Frontend | React, Vite, JavaScript, CSS |
-| Backend | Java, Spring Boot, Maven |
-| Scanner | Python (separate repository) |
-| Version control | Git, GitHub |
+| Backend | Java 21, Spring Boot, Maven |
+| Scanner | Python |
+| Version control | Git and GitHub |
 | CI/CD | Jenkins |
-| Testing | JUnit, MockMvc |
-| Security scanning | Trivy |
-| Containers | Docker, docker-compose |
-| Monitoring | Spring Boot Actuator, Uptime Kuma |
-| Feedback | Jenkins notifications, GitHub Issues |
- 
----
- 
+| Backend testing | JUnit and Spring MVC test tooling, as configured in Maven |
+| Security scanning | Trivy filesystem scan |
+| Containers | Docker and Docker Compose |
+| Metrics and health | Spring Boot Actuator, Micrometer, Prometheus |
+| Dashboards | Grafana |
+
 ## Related repositories
- 
-- **actionguard**: the Python scanner this dashboard calls
-- **actionguard-demo**: vulnerable vs fixed workflows and the attack replay scripts, used as the scanner's reference test case (the vulnerable workflow should be flagged, the fixed one should pass)
----
- 
-## Project structure
- 
-```
-actionguard-dashboard/
+
+The project documentation refers to these companion repositories:
+
+- **`actionguard`** — the Python scanner invoked by the dashboard.
+- **`actionguard-demo`** — demonstration repository containing vulnerable and fixed workflow examples and safe attack-replay scripts.
+- **`ActionGuard-Dashboard`** — this repository.
+
+Make sure the companion scanner is available and that the scanner path and invocation settings match your checkout layout.
+
+## Repository structure
+
+```text
+action-guard-dashboard/
 ├── backend/
-│   ├── src/main/java/          # Spring Boot app and scan API
-│   ├── src/main/resources/
-│   ├── src/test/java/          # JUnit and MockMvc tests
+│   ├── src/main/java/          # Spring Boot application and API controllers
+│   ├── src/main/resources/     # Application configuration
+│   ├── src/test/java/          # Backend tests
 │   ├── pom.xml
 │   └── Dockerfile
 ├── frontend/
-│   ├── src/                    # React UI
+│   ├── src/                    # React interface
 │   ├── package.json
 │   ├── vite.config.js
+│   ├── nginx.conf
 │   └── Dockerfile
-├── monitoring/                 # Uptime Kuma setup notes/config
+├── prometheus/
+│   └── prometheus.yml          # Prometheus scrape configuration
 ├── docker-compose.yml
-├── Jenkinsfile
-├── .github/workflows/ci.yml    # lightweight CI check on pull requests
 └── README.md
 ```
- 
----
- 
-## Getting started
- 
-### Prerequisites
- 
+
+This is a high-level view; check the current repository tree for exact paths as the project evolves.
+
+## Requirements
+
+For a local development workflow:
+
 - Git
-- Java JDK (version matching `backend/pom.xml`)
+- Java Development Kit 21
 - Node.js and npm
-- Python 3 and a local checkout of the **actionguard** scanner
-- Docker and docker-compose (for the containerised setup)
-### Option 1: run locally
- 
-**Backend**
- 
+- Python 3
+- A local checkout of the ActionGuard Python scanner
+- Access to the public GitHub repository being scanned
+
+For the containerized workflow:
+
+- Docker Desktop or Docker Engine
+- Docker Compose
+- Internet access to pull images and resolve dependencies on the first build
+
+## Run locally
+
+### 1. Clone the dashboard
+
 ```bash
-cd backend
-./mvnw spring-boot:run        # Windows: .\mvnw.cmd spring-boot:run
+git clone https://github.com/Srishti018/ActionGuard-Dashboard.git
+cd ActionGuard-Dashboard
 ```
- 
-Runs on port `8081`.
- 
-**Frontend**
- 
+
+### 2. Start the backend
+
+In a terminal:
+
+```powershell
+cd backend
+.\mvnw.cmd spring-boot:run
+```
+
+On macOS/Linux, if the Maven wrapper is present and executable:
+
 ```bash
+./mvnw spring-boot:run
+```
+
+The backend is configured to listen on port `8081`.
+
+### 3. Start the frontend
+
+Open a second terminal:
+
+```powershell
 cd frontend
 npm install
 npm run dev
 ```
- 
-Open `http://localhost:5173`.
- 
-### Option 2: run with Docker
- 
-```bash
-docker-compose up -d --build
+
+Vite normally serves the development frontend at `http://localhost:5173`.
+
+### 4. Try a scan
+
+1. Open the frontend in your browser.
+2. Enter a public GitHub repository URL you are authorized to assess.
+3. Submit the scan and review the summary and findings.
+
+The scanner is a separate component. If scans fail, verify that the scanner repository is checked out where the backend expects it and that Python is installed and accessible.
+
+## Run with Docker Compose
+
+From the repository root, build and start the services:
+
+```powershell
+docker compose up --build -d
 ```
- 
-| Service | URL |
-|---|---|
-| Dashboard | `http://localhost:5173` |
-| Backend API | `http://localhost:8081` |
-| Health check | `http://localhost:8081/actuator/health` |
-| Uptime Kuma | `http://localhost:3001` |
- 
-### Run a scan
- 
-1. Open the dashboard.
-2. Enter a public GitHub repository URL.
-3. Submit and review the summary and findings.
-Scans take a little while because the repository is cloned and scanned on demand.
- 
----
- 
+
+Check service status:
+
+```powershell
+docker compose ps
+```
+
+Inspect logs:
+
+```powershell
+docker compose logs --tail=100
+```
+
+Follow a particular service's logs:
+
+```powershell
+docker compose logs -f backend
+```
+
+Stop the services:
+
+```powershell
+docker compose down
+```
+
+### Local service URLs
+
+The current local Compose setup is intended to expose these ports; check `docker-compose.yml` if your local mappings differ.
+
+| Service | Local URL | Purpose |
+|---|---|---|
+| Dashboard | `http://localhost:3000` | Frontend served by the container's web server |
+| Backend | `http://localhost:8081` | Spring Boot API |
+| Backend health | `http://localhost:8081/actuator/health` | Actuator health endpoint |
+| Prometheus | `http://localhost:9090` | Scrape status and metrics queries |
+| Grafana | `http://localhost:3001` | Monitoring dashboards |
+
+These are local development endpoints, not public deployment URLs.
+
 ## Configuration
- 
-Machine-specific values are read from environment variables so the same code runs locally, in Docker and under Jenkins.
- 
-| Variable | Purpose |
+
+Configuration may differ between the host, Docker containers, and Jenkins. Check the backend configuration and Compose file before changing values.
+
+| Setting | Purpose |
 |---|---|
-| `SCANNER_DIR` | Path to the ActionGuard scanner checkout |
-| `PYTHON_EXECUTABLE` | Python executable used to launch the scanner |
-| `SERVER_PORT` | Backend port (default `8081`) |
- 
-Secrets (Docker Hub credentials, notification webhooks) are never stored in the repository. They live in the Jenkins credentials store.
- 
----
- 
-## Scan output
- 
-The scanner returns JSON with a root path, a summary and a list of findings.
- 
+| `ACTIONGUARD_SCANNER_DIR` | Scanner checkout location in the Docker backend configuration, where configured |
+| `ACTIONGUARD_PYTHON` | Python executable used to invoke the scanner, where configured |
+| `server.port` | Spring Boot HTTP port; configured as `8081` in this project |
+
+Some older setup notes may refer to `SCANNER_DIR` and `PYTHON_EXECUTABLE`. Do not assume these names are interchangeable: use the names read by the current backend code and Dockerfile.
+
+### Secrets
+
+- Do not commit API tokens, passwords, webhook URLs, or `.env` files containing secrets.
+- Use Jenkins credentials or environment variables for sensitive values.
+- Never put secrets in screenshots or example commands.
+- Avoid exposing Prometheus or Grafana publicly without authentication and an explicit access-control plan.
+
+## API and health checks
+
+The backend exposes a Spring Boot Actuator health endpoint:
+
+```text
+GET /actuator/health
+```
+
+Test it locally with:
+
+```powershell
+curl.exe http://localhost:8081/actuator/health
+```
+
+The application configuration also enables the Actuator Prometheus endpoint:
+
+```text
+GET /actuator/prometheus
+```
+
+The scan API is implemented in the backend controller. Check `ScanController.java` for the exact route, HTTP method, request schema, and response shape before relying on an endpoint contract; these details are intentionally not guessed here.
+
+## Understanding scan results
+
+The scanner returns a JSON report containing a summary and findings. The exact report fields depend on the scanner implementation. The following is an **illustrative example**, not a guarantee that every scan returns these exact values or wording:
+
 ```json
 {
   "root": "cloned-repo",
-  "summary": { "total": 2, "high": 1, "critical": 0, "pinned": 1 },
+  "summary": {
+    "total": 2,
+    "high": 1,
+    "critical": 0,
+    "pinned": 1
+  },
   "findings": [
     {
-      "file": ".github/workflows/vulnerable-demo.yml",
+      "file": ".github/workflows/example.yml",
       "line": 14,
-      "action": "./fake-action@v1",
+      "action": "owner/action@v1",
       "status": "unpinned",
       "severity": "HIGH",
       "message": "Action is referenced by a mutable tag instead of a full commit SHA."
@@ -232,109 +352,200 @@ The scanner returns JSON with a root path, a summary and a list of findings.
   ]
 }
 ```
- 
+
 | Field | Meaning |
 |---|---|
 | `file` | Workflow file containing the reference |
-| `line` | Line number of the reference |
-| `action` | The action reference being examined |
-| `status` | Scanner classification (for example `pinned`, `unpinned`) |
-| `severity` | INFO, MEDIUM, HIGH or CRITICAL |
-| `message` | Explanation of the finding |
- 
-A finding is a signal to review, not proof that a repository is exploitable. A clean report is not a guarantee of safety.
- 
----
- 
-## DevOps implementation: the 7 C's
- 
-All seven are applied to this repository.
- 
-| C | Tools | How it is implemented |
-|---|---|---|
-| **Continuous Development** | Git, GitHub | Feature branches, pull requests into `main`, small commits with meaningful messages |
-| **Continuous Integration** | Jenkins, Maven, npm | A GitHub webhook triggers Jenkins on every push. Jenkins checks out the code and builds the backend and frontend |
-| **Continuous Testing** | JUnit, MockMvc, Trivy | Unit tests, API tests, and Trivy scans of the source tree and the Docker image. The build fails on HIGH or CRITICAL findings |
-| **Continuous Deployment** | Docker, docker-compose, Jenkins | Jenkins builds the Docker images and deploys with docker-compose automatically after tests pass |
-| **Continuous Monitoring** | Spring Boot Actuator, Uptime Kuma | Actuator exposes health and metrics. Uptime Kuma checks the health endpoint and shows uptime history |
-| **Continuous Feedback** | Jenkins notifications, GitHub Issues | Failed builds send an alert. Bugs and suggestions are tracked as GitHub Issues |
-| **Continuous Operations** | Docker | Restart policy for crash recovery, versioned image tags per build, and rollback to a previous tag |
- 
-### 1. Continuous Development
-Work happens on feature branches and is merged through pull requests. Commits are small and descriptive so the Git history documents how the project was built.
- 
-### 2. Continuous Integration
-Jenkins is connected to GitHub with a webhook. Each push starts the pipeline, which builds the Spring Boot backend with Maven and the React frontend with npm. A broken build stops the pipeline immediately.
- 
-### 3. Continuous Testing
-- **JUnit** covers backend logic such as URL validation and report parsing.
-- **MockMvc** tests the REST endpoints without starting a full server.
-- **Trivy** scans for known vulnerabilities in two places: project dependencies (`trivy fs`) and the built Docker image (`trivy image`). The pipeline fails on HIGH or CRITICAL results. This matters for a supply-chain security project because it checks our own supply chain too.
-### 4. Continuous Deployment
-After tests and scans pass, Jenkins builds the images and runs `docker-compose up -d`. Nobody deploys by hand.
- 
-### 5. Continuous Monitoring
-- **Spring Boot Actuator** exposes `/actuator/health` and `/actuator/metrics`.
-- **Uptime Kuma** (runs as a container) pings the health endpoint on a schedule and shows a status page with uptime history.
-### 6. Continuous Feedback
-- Jenkins sends a notification when a build fails, using the `post { failure { ... } }` block of the Jenkinsfile.
-- GitHub Issues track bugs and improvement ideas, and issues are closed by commits that reference them.
-### 7. Continuous Operations
-- `restart: always` in docker-compose brings containers back after a crash.
-- Images are tagged with the Jenkins build number (for example `actionguard-backend:42`), not only `latest`.
-- **Rollback:** if a deployment misbehaves, redeploy the previous tagged image.
-Docker deployment and automated Jenkins pipeline verification.
----
- 
-## CI/CD pipeline (Jenkins)
- 
-Pipeline stages, in order:
- 
+| `line` | Line number reported by the scanner |
+| `action` | Action reference examined |
+| `status` | Scanner classification, such as pinned or unpinned |
+| `severity` | Severity assigned by configured rules |
+| `message` | Explanation supplied by the scanner |
+
+A finding is a signal to investigate, not proof that a repository is exploitable. A report with no findings does not guarantee that a repository or its workflows are safe.
+
+## Jenkins CI/CD pipeline
+
+The Jenkins pipeline currently configured for this project has these stages:
+
+```mermaid
+flowchart TD
+    A[Checkout source] --> B[Build frontend]
+    B --> C[Test backend]
+    C --> D[Trivy security scan]
+    D --> E[Build Docker images]
 ```
-Checkout
-   ↓
-Build (Maven + npm)
-   ↓
-Unit and API tests (JUnit, MockMvc)
-   ↓
-Trivy filesystem scan
-   ↓
-Docker build (tagged with build number)
-   ↓
-Trivy image scan
-   ↓
-Deploy (docker-compose)
-   ↓
-Post: notify on failure
+
+### Stage overview
+
+1. **Checkout** — obtains source code from version control.
+2. **Build Frontend** — installs frontend dependencies and runs the frontend build.
+3. **Test Backend** — invokes the Maven wrapper to run backend tests.
+4. **Trivy Security Scan** — runs the configured filesystem scan for vulnerability and misconfiguration checks.
+5. **Build Docker Images** — builds the application container images.
+
+The pipeline can stop at the first failing stage. Review that stage's console output to identify the cause. For example, Maven cannot run tests if `backend/pom.xml` is malformed XML.
+
+> **Deployment status:** The stages above cover checkout, build, test, scanning, and image building. Do not claim that Jenkins automatically deploys the application unless a deployment stage has been added and verified.
+
+If Jenkins is triggered by a GitHub webhook through a temporary Cloudflare Tunnel, the tunnel must be running and the webhook must point to the current tunnel URL. A stopped or changed temporary tunnel can interrupt webhook delivery, but it does not prevent manual builds or normal Git pushes.
+
+## Trivy security scanning
+
+Trivy is included in the Jenkins pipeline to scan the project filesystem. The configured command has used scanners such as:
+
+```powershell
+trivy fs --scanners vuln,misconfig --exit-code 0 .
 ```
- 
-Credentials such as the Docker Hub login and notification webhook are stored in the Jenkins credentials store and read with `withCredentials`. They are never hardcoded.
- 
-The repository also has a small GitHub Actions workflow (`.github/workflows/ci.yml`) that builds the frontend and runs backend tests on pull requests as a quick check. Third-party actions in it are pinned to full commit SHAs, following the practice this project exists to promote.
- 
----
- 
-## Security notes
- 
-- Only scan repositories you are authorised to assess.
-- The backend clones submitted repositories and runs the scanner locally. The scanner never executes scripts from the scanned repository.
-- Temporary directories are deleted after each scan.
-- Tokens, credentials and secrets are not logged and not committed.
-- The demo repository uses only fake secrets and repositories owned by the team.
-- This is a prototype. Before any shared or public deployment, add request limits, timeouts, stricter URL validation and operational hardening.
----
- 
+
+The exact command in the Jenkins job is authoritative. With `--exit-code 0`, findings do not by themselves force a nonzero exit code, so this invocation should not be described as a strict build-blocking security gate. A filesystem scan also does not prove that every container image, runtime configuration, or application behavior has been assessed.
+
+Use the pipeline log to confirm what was scanned and whether findings were reported. Document image scanning separately only if it has been implemented and verified.
+
+## Prometheus and Grafana monitoring
+
+The backend is configured with Spring Boot Actuator and Micrometer's Prometheus registry. Prometheus scrapes the backend's Actuator Prometheus endpoint using the service name on the Docker Compose network.
+
+### Local monitoring endpoints
+
+- Prometheus: `http://localhost:9090`
+- Prometheus targets: `http://localhost:9090/targets`
+- Grafana: `http://localhost:3001`
+
+The backend target should show **UP** in Prometheus when scraping succeeds.
+
+### Dashboard panels
+
+The ActionGuard Monitoring dashboard created for this project includes panels for:
+
+- Backend CPU usage (`process_cpu_usage`)
+- JVM memory usage (`jvm_memory_used_bytes`)
+- Backend scrape status (`up{job="actionguard-backend"}`)
+
+Metric availability can vary with the running application and exporter configuration. JVM memory can produce multiple time series, for example for different memory pools.
+
+If the dashboard shows no data:
+
+1. Check that backend, Prometheus, and Grafana containers are running.
+2. Visit Prometheus `/targets` and confirm the backend target is **UP**.
+3. Check `prometheus/prometheus.yml`.
+4. When Grafana runs on the same Compose network, confirm its Prometheus data source uses `http://prometheus:9090`.
+5. Check the relevant container logs.
+
+Do not expose monitoring endpoints publicly without reviewing authentication, network access, and metric sensitivity.
+
+## Testing and troubleshooting
+
+### Check containers
+
+```powershell
+docker compose ps
+docker compose logs --tail=100 backend
+docker compose logs --tail=100 frontend
+docker compose logs --tail=100 prometheus
+docker compose logs --tail=100 grafana
+```
+
+### Maven reports a non-parseable `pom.xml`
+
+1. Open `backend/pom.xml` and check that the XML declaration appears only once and is the first content in the file.
+2. Check the committed version as well as the local working copy.
+3. Inspect the file in the Jenkins workspace after checkout.
+4. Fix the source file, commit the correction, and push it so a fresh Jenkins checkout receives it.
+
+Editing only Jenkins' temporary workspace will not persist after another checkout.
+
+### Frontend does not open
+
+- Confirm the frontend container is running.
+- Verify the host port mapping in `docker-compose.yml`.
+- Inspect frontend/Nginx logs.
+- For development mode, confirm Vite is running and use its displayed URL.
+
+### Backend health check fails
+
+- Inspect backend logs.
+- Confirm port `8081` is mapped as expected.
+- Verify the backend started successfully before testing `/actuator/health`.
+
+### Scan fails
+
+- Confirm the repository URL is valid and accessible to the scanner.
+- Check the configured scanner directory and Python executable.
+- Review backend logs for clone, timeout, or scanner execution errors.
+- Confirm the backend process can create and remove temporary checkouts.
+
+### Prometheus target is DOWN
+
+- Check that the backend container is running.
+- Confirm the target uses the Compose service name and port, such as `backend:8081`.
+- Verify the Actuator Prometheus endpoint is enabled and reachable from the Prometheus container.
+
+## Security considerations
+
+ActionGuard is a prototype security tool and should be run with appropriate safeguards.
+
+- Only scan repositories you are authorized to assess.
+- Treat submitted repository URLs as untrusted input.
+- If the scan endpoint is accessible without authentication, anyone who can reach it may request scans. Add authentication or access restrictions, rate limits, request validation, timeouts, and resource limits before public exposure.
+- Review URL validation and clone behavior to reduce server-side request forgery (SSRF), internal-network access, and unsafe URL handling risks.
+- Keep the scanner isolated and avoid executing scripts or workflows from scanned repositories.
+- Ensure temporary checkouts and generated reports are handled safely and cleaned up as intended.
+- Keep dependencies updated and review Trivy output.
+- Do not commit secrets. Use dedicated secret storage for Jenkins credentials.
+- Keep Prometheus and Grafana private unless there is a deliberate, secured access design.
+- A scanner result is not a substitute for a full security review.
+
+**The application is intended for local use at this stage. Do not expose the scan endpoint publicly until access controls and resource-abuse protections have been reviewed.**
+
 ## Limitations
- 
-- The scanner focuses on `uses:` references in GitHub Actions workflows and the rules implemented in the separate Python scanner.
-- Results depend on those rules and on `known_compromised.json`.
-- Scans run on demand, and scan history is not persisted yet.
-- Test on representative repositories before using results for security decisions.
----
- 
-## Roadmap
- 
-- [ ] Persist scan history in a database
-- [ ] Attack replay screen (normal, compromised, detected, fixed) fed by captured data from `actionguard-demo`
-- [ ] Prometheus and Grafana dashboards on top of Actuator metrics
-- [ ] Better error reporting for clone failures and scanner failures
+
+- Detection is limited to checks implemented by the Python scanner and its known-compromised data.
+- A known-compromised list can become outdated and may not include every malicious action.
+- Mutable-reference detection does not establish whether the referenced action is otherwise safe.
+- Scans run on demand; persistent scan history is not documented as implemented.
+- Large repositories, unavailable repositories, rate limits, network errors, and malformed inputs may affect scan behavior.
+- The Jenkins pipeline described here covers checkout, frontend build, backend tests, Trivy filesystem scanning, and Docker image building; automatic deployment is not claimed.
+- Trivy filesystem scanning is not a complete application or runtime security audit.
+- Public deployment, authentication, and abuse prevention require further work.
+
+## Future improvements
+
+- Persist scan history and reports in a database.
+- Improve scan failure messages and timeout handling.
+- Add authentication, rate limiting, and stronger request validation before any shared deployment.
+- Improve scanner coverage and the maintenance process for known-compromised data.
+- Add verified container-image scanning to the pipeline if required.
+- Add automated tests for scanner findings and edge cases.
+- Document and test a deployment stage only after it is implemented.
+- Expand monitoring and alerting based on operational requirements.
+
+## Screenshots
+
+Add screenshots captured from the real, running application. Save them under `docs/screenshots/` and update the paths below. Do not use mockups as evidence of implemented behavior.
+
+| Screenshot | Suggested file |
+|---|---|
+| Main dashboard | `docs/screenshots/dashboard.png` |
+| Scan results for a public test repository | `docs/screenshots/scan-results.png` |
+| Successful Jenkins Stage View | `docs/screenshots/jenkins-pipeline.png` |
+| Prometheus target showing the backend as UP | `docs/screenshots/prometheus-targets.png` |
+| Grafana ActionGuard Monitoring dashboard | `docs/screenshots/grafana-dashboard.png` |
+
+Once the images exist, embed them like this:
+
+```markdown
+![ActionGuard dashboard](docs/screenshots/dashboard.png)
+```
+
+## Contributing
+
+Contributions and suggestions are welcome. A useful contribution workflow is:
+
+1. Open an issue describing the bug, improvement, or proposed rule.
+2. Create a focused branch for the change.
+3. Make the change and add or update tests where applicable.
+4. Run the relevant frontend build and backend tests locally.
+5. Open a pull request describing the change, validation performed, and any security implications.
+
+Avoid including credentials, private repository contents, or real secrets in issues, logs, screenshots, and test fixtures.
